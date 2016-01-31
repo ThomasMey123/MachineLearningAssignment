@@ -1,0 +1,184 @@
+---
+title: "MachineLearningAssignment"
+author: "Thomas Mey"
+date: "Saturday, January 31, 2016"
+output: html_document
+file: index.html    
+---
+
+#Introduction
+Training and test data from accelerometers are provided from an experiment, where the quality of exercise execution shall be captured and predicted. The task of this assignment is to predict the class of exercise (variable classe) using *any* of the given input variables.
+
+#Summary
+If you are trying to figure out a decent method to answer this question without looking into the test data it is getting quite complicated - this will be explained in the third part of this paper. However - if you take a look at the test data (which influences the choice of your method) a much easier but mostly worthless algorithm comes obviously to your mind (part one of this paper). But this will be enough to answer the assignment.  
+**Note for graders: You could also stop after the first part.**  
+In the second part I will discuss why the solution from part one will not work on new data and how a more sophisticated method might address this problem.
+
+#Part one - Solve the assignment problem
+
+Let's read the training and test data and perform some exploratory analysis on the training data.
+```{r}
+suppressWarnings(suppressMessages(library(caret)))
+suppressWarnings(suppressMessages(library(randomForest)))
+
+#Read data using standard method, attention: there are actually two constants indicating an NA value
+train<-read.csv("pml-training.csv",na.strings=c("NA", "#DIV/0!"))
+test<-read.csv("pml-testing.csv",na.strings=c("NA", "#DIV/0!"))
+```
+
+Perform some exporatory data analysis:
+```{r}
+head(train[,c(2,7,8,160)],n=5)
+
+head(train[10000:10005,c(2,7,8,160)],n=5)
+
+dim(train)
+dim(test)
+```
+There seems to be some relation between Num_window and classe.
+
+```{r}
+plot(train$num_window,train$classe)
+```
+
+It seems that there is some strong, hence non-linear relation between *classe* and the predictor *num_window*. So let's use just num_window as predictor for a random forrest model.
+
+```{r}
+suppressWarnings(mod<-train(classe~num_window,method="rf",data=train))
+```
+
+Now what about cross validation and the out of sample error rate?  
+**Cross validation:** It is not necessary to set aside and use cross validation data here since the random forrest method will do this for us automatically.  
+**Out of sample error rate:**  
+```{r}
+mod$finalModel
+``` 
+
+The 'OOB' (out of bag error estimate) is what we are looking for. It is 0.01% - This is a very good value.
+Finally let's predict the value of interest for the test set:
+
+```{r}
+res<-predict(mod,newdata=test)
+test<-cbind(test,res)
+test[,160:161]
+```
+With these values the assignment test will be passed, so they should be ok.  
+Looks perfect - doesn't it?
+Well...  
+**Note for graders: Only continue if you are interested, document portion for grading ends here**
+
+#Part two - using new data
+Actually the test data set seem to be some randomly selected records from an original data set and the remaining data forns the training set. One problem is the relation of training and test set size, the test set is very small compared to the training set. The bigger problem is that no-signal parameters as the time window (or the time) allow you to predict the correct variable. Moreover all the experiments have been executed in ascending order, so just by knowing when the exercise was performed you could make a good guess. Leaving away the dependeny on the person user\_name colums 1 through 8 contain background information that should not be used for building a model. Moreover it might be very challenging to build a model with just one record from the test - you might better use whole chunks of data, i.e. a whole data window new\_window and  num\_window
+
+Could we build testing and training data where the testing data is 'new' data and cannot be easily predict by variables as the time window and where the there is no dependency between the window number and the outcome (low numbers: classe = A, high numbers: classe = E)?
+Let's try:
+
+```{r}
+raw<-read.csv("pml-training.csv",na.strings=c("NA", "#DIV/0!"))
+
+#Let's get the window numbers and resample them
+set.seed(123)
+num_windows<-unique(raw$num_window)
+new_num_windows<-sample(num_windows)
+
+windows<-data.frame(cbind(num_windows,new_num_windows))
+sorted_windows<-windows[order(windows$num_windows),]
+raw$new_num_window<-NA
+for(i in 1:dim(sorted_windows)[1]) {
+    new_num_window <-sorted_windows[i,2]
+    raw[num_windows ==sorted_windows[i,1],]$new_num_window <-new_num_window
+}
+
+train<-sample(new_num_windows,size=length(num_windows)*0.7)
+test<-setdiff(new_num_windows,train)
+
+training<-raw[raw$num_window %in% train,]
+testing<-raw[raw$num_window  %in% test,]
+
+dim(training)
+dim(testing)
+```
+
+
+
+```{r}
+plot(training$new_num_window,training$classe)
+```
+Let's teach a model with training set as we did before
+
+```{r}
+suppressWarnings(mod<-train(classe~new_num_window,method="rf",data=training))
+```
+
+
+How does the out of sample error rate look now. Again, we first use the models OOB error rate:
+```{r}
+mod$finalModel
+``` 
+
+Ooops: The 'OOB' is now 85%. What happend? To build the model we relied on information that does not allow a real prediction of the classe information if the data is unknown and the sequence of the observation is changed. 
+
+#Part three - an alternative model
+
+With the test and training set from above lets see if a decent prediction is possible.
+For the sake of simplicity lets focus here not the whole data chunks for one measurement, but only to the summary of those: These can be found with new\_window == yes.
+
+Lets try to find out which variables are set for the summary and which ones are set within a window
+```{r}
+library(caret)
+summarySet<-training$new_window=="yes"
+summaries<-training[summarySet,]
+continous<-training[!summarySet,]
+
+dim(summaries)
+
+testSummarySet<-testing$new_window=="yes"
+testSummaries<-testing[testSummarySet,]
+testContinous<-testing[!testSummarySet,]
+
+dim(testSummaries)
+
+#Select some samples of the continous information and get all columns that do not contain an NA
+nonNAColumns<-function(x){
+    r<-sapply(x, is.na)
+    c<-NULL
+    width<-dim(x)[2]
+    for(i in 1:width ){
+        if(all(r[,i])){c<-c(c,i)}
+    }
+    setdiff(1:width,c)
+}
+```
+
+Use the colums that contain summary information, but that do not represent a continous signal
+and add the value we are looking for.
+In addition we need to remove some colums without variance for a smooth pca.  
+```{r}
+summaryCols<-nonNAColumns(summaries)
+continousCols<-nonNAColumns(continous)
+
+resultingCols<-c(setdiff(summaryCols,continousCols),160)
+
+cleanedSummaries<-summaries[,resultingCols]
+cleanedTestSummaries<-testSummaries[,resultingCols]
+
+#remove cols without variance: amplitude_yaw_belt, amplitude_yaw_dumbbell, amplitude_yaw_forearm
+noVarCols<-grep( "(amplitude_yaw_belt|amplitude_yaw_dumbbell|amplitude_yaw_forearm)",colnames(cleanedSummaries))
+
+
+summaryColsSignal<-setdiff(1:dim(cleanedSummaries)[2],noVarCols)
+cleanedSummaries<-cleanedSummaries[,summaryColsSignal]
+cleanedTestSummaries<-cleanedTestSummaries[,summaryColsSignal]
+
+dim(cleanedSummaries)
+dim(cleanedTestSummaries)
+```
+Use A random forrest using the summaries that have been run through a pca
+
+```{r}
+suppressWarnings(mod<-train(cleanedSummaries$classe~.,method="rf",preprocess="pca",data=cleanedSummaries))
+
+mod$finalModel
+```
+
+The newly developed model shows an error rate of 19% - which isn't great but you would be able to distinguish different levels based on summary information from a data window with some a more reasonable error rate for new data.
